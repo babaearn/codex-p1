@@ -57,12 +57,20 @@ def format_telegram_signal(
 
     cvd_long = _to_float(absorption_components.get("cvd_long"))
     cvd_short = _to_float(absorption_components.get("cvd_short"))
+    obi_long = _to_float(absorption_components.get("orderbook_imbalance_long"))
+    obi_short = _to_float(absorption_components.get("orderbook_imbalance_short"))
+    sweep_long = _to_float(absorption_components.get("sweep_aggression_long"))
+    sweep_short = _to_float(absorption_components.get("sweep_aggression_short"))
     hidden_long = bool(absorption_components.get("hidden_divergence_long", False))
     hidden_short = bool(absorption_components.get("hidden_divergence_short", False))
     if event.direction == "LONG":
         cvd_flag = _check(cvd_long >= 0.5 or hidden_long)
+        obi_flag = _check(obi_long >= 0.5)
+        sweep_flag = _check(sweep_long >= 0.5)
     else:
         cvd_flag = _check(cvd_short >= 0.5 or hidden_short)
+        obi_flag = _check(obi_short >= 0.5)
+        sweep_flag = _check(sweep_short >= 0.5)
 
     score_100 = round(event.score * 100)
     direction_title = "REVERSAL IMMINENT"
@@ -95,13 +103,16 @@ def format_telegram_signal(
         f"Funding Rate      : {funding_rate:+.4%} -> {funding_state} {funding_flag}\n"
         f"Cross-Exchange OI : {oi_note_text} {oi_flag}\n"
         f"CHoCH 5m          : {choch_flag}\n"
-        f"CVD Divergence    : {cvd_flag}\n\n"
+        f"CVD Divergence    : {cvd_flag}\n"
+        f"OB Imbalance      : {obi_flag}\n"
+        f"Sweep Aggression  : {sweep_flag}\n\n"
         f"SCORE: {score_100}/100\n\n"
         f"Entry : ${plan.entry:,.2f}\n"
         f"SL    : ${plan.sl:,.2f} ({_pct(plan.sl_pct)})\n"
         f"TP1   : ${plan.tp1:,.2f} ({_pct(plan.tp1_pct)})\n"
         f"TP2   : ${plan.tp2:,.2f} ({_pct(plan.tp2_pct)})\n"
         f"R:R   : 1:{plan.rr:.2f}"
+        f"\nQty   : {plan.quantity:.6f}"
         f"{ids_line}"
         "================================"
         "</pre>"

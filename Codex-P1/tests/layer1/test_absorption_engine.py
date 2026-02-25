@@ -14,6 +14,7 @@ from project_phantom.core.types import (
     SignalBreakdown,
     TradeTick,
     TrapSetupEvent,
+    OrderBookTick,
 )
 from project_phantom.layer1.absorption_engine import run_layer1
 
@@ -26,6 +27,22 @@ class FakeTradeClient:
     async def stream_trades(self, symbol: str) -> AsyncIterator[TradeTick]:
         for trade in self.trades:
             yield trade
+            await asyncio.sleep(0.005)
+        while True:
+            await asyncio.sleep(1)
+
+    async def close(self) -> None:
+        return None
+
+
+@dataclass
+class FakeBookClient:
+    name: str
+    books: list[OrderBookTick]
+
+    async def stream_book_ticker(self, symbol: str) -> AsyncIterator[OrderBookTick]:
+        for book in self.books:
+            yield book
             await asyncio.sleep(0.005)
         while True:
             await asyncio.sleep(1)
@@ -98,16 +115,36 @@ def _trade_samples() -> list[TradeTick]:
     return rows
 
 
+def _book_samples() -> list[OrderBookTick]:
+    base = int(time.time() * 1000)
+    return [
+        OrderBookTick(
+            exchange="binance",
+            symbol="BTCUSDT",
+            bid_price=10_000 + idx,
+            bid_qty=120.0,
+            ask_price=10_001 + idx,
+            ask_qty=70.0,
+            ts_ms=base + idx * 1_000,
+        )
+        for idx in range(10)
+    ]
+
+
 def _layer1_config(*, whale_alert_enabled: bool = False) -> Layer1Config:
-    return Layer1Config(
+    config = Layer1Config(
         symbol="BTCUSDT",
         cadence_seconds=0.05,
         trade_window_seconds=300,
         setup_ttl_seconds=180,
         min_trades_for_metrics=5,
         whale_alert=WhaleAlertConfig(enabled=whale_alert_enabled, poll_interval_seconds=0.05),
+        enable_binance_orderbook=False,
         backoff=BackoffConfig(min_seconds=0.05, max_seconds=0.2),
     )
+    config.thresholds.score_threshold = 0.45
+    config.thresholds.min_component_hits = 2
+    return config
 
 
 @pytest.mark.asyncio
@@ -193,3 +230,34 @@ async def test_layer1_whale_alert_missing_data_sets_degraded_flag() -> None:
     assert event.degraded is True
     assert event.degrade_reason is not None
     assert "WHALE_ALERT_NO_DATA" in event.degrade_reason
+
+
+@pytest.mark.asyncio
+async def test_layer1_includes_orderbook_microstructure_metrics() -> None:
+    in_queue: asyncio.Queue[TrapSetupEvent] = asyncio.Queue()
+    out_queue: asyncio.Queue[AbsorptionEvent] = asyncio.Queue(maxsize=10)
+    stop_event = asyncio.Event()
+    in_queue.put_nowait(_trap_event("LONG"))
+
+    config = _layer1_config()
+    config.enable_binance_orderbook = True
+    trade_client = FakeTradeClient(name="fake-trades", trades=_trade_samples())
+    book_client = FakeBookClient(name="fake-book", books=_book_samples())
+    task = asyncio.create_task(
+        run_layer1(
+            config,
+            in_queue,
+            out_queue,
+            stop_event=stop_event,
+            trade_client=trade_client,
+            book_client=book_client,
+        )
+    )
+    await asyncio.sleep(0.5)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert not out_queue.empty()
+    event = out_queue.get_nowait()
+    assert "orderbook_imbalance_avg" in event.raw
+    assert event.components.orderbook_imbalance_long >= 0

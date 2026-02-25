@@ -193,6 +193,10 @@ def _format_mode_report(*, symbol_scope: str, symbol_count: int, layer3: Layer3C
         f"binance_testnet      : {layer3.binance.testnet}",
         f"entry_cooldown_s     : {layer3.guard.min_seconds_between_entries}",
         f"max_entries_per_hour : {layer3.guard.max_entries_per_hour}",
+        f"sizing_enabled       : {layer3.sizing.enabled}",
+        f"sizing_min_max_mult  : {layer3.sizing.min_multiplier}-{layer3.sizing.max_multiplier}",
+        f"session_enabled      : {layer3.session.enabled}",
+        f"session_hours_utc    : {','.join(str(x) for x in layer3.session.allowed_hours_utc)}",
         "================================",
     ]
     return "<pre>" + "\n".join(lines) + "</pre>"

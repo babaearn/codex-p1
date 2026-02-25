@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from project_phantom.config import Layer3RiskConfig
+from project_phantom.config import Layer3RiskConfig, Layer3SizingConfig
 from project_phantom.core.types import Direction, ExecutionPlan, PrePumpEvent
 
 
@@ -109,3 +109,42 @@ def build_execution_plan(
         quantity=quantity,
         risk_amount=risk_amount,
     )
+
+
+def derive_adaptive_quantity(
+    event: PrePumpEvent,
+    *,
+    base_quantity: float,
+    sizing: Layer3SizingConfig,
+) -> tuple[float, float]:
+    if base_quantity <= 0:
+        return (0.0, 0.0)
+    if not sizing.enabled:
+        return (base_quantity, 0.0)
+
+    confirmations = max(0, int(event.components.confirmations))
+    confirmations_score = min(confirmations / 5.0, 1.0)
+    signal_score = max(0.0, min(float(event.score), 1.0))
+    trap_score = _nested_float(event.raw, "source_absorption_raw", "source_trap_score")
+    if trap_score is None:
+        trap_score = signal_score
+    trap_score = max(0.0, min(float(trap_score), 1.0))
+
+    regime_key = "regime_long_score" if event.direction == "LONG" else "regime_short_score"
+    regime_score = _nested_float(event.raw, "source_absorption_raw", "source_trap_raw", regime_key)
+    if regime_score is None:
+        regime_score = 0.5
+    regime_score = max(0.0, min(float(regime_score), 1.0))
+
+    confidence = (0.35 * signal_score) + (0.30 * confirmations_score) + (0.20 * trap_score) + (0.15 * regime_score)
+    floor = max(0.0, min(0.95, sizing.confidence_floor))
+    if confidence <= floor:
+        normalized = 0.0
+    else:
+        normalized = min((confidence - floor) / max(1e-9, 1.0 - floor), 1.0)
+
+    multiplier = sizing.min_multiplier + (sizing.max_multiplier - sizing.min_multiplier) * normalized
+    if event.degraded:
+        multiplier *= 0.7
+    quantity = max(base_quantity * multiplier, base_quantity * 0.1)
+    return (round(quantity, 6), confidence)

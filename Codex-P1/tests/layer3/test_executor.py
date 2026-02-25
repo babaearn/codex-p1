@@ -7,7 +7,15 @@ from typing import Any
 
 import pytest
 
-from project_phantom.config import BackoffConfig, Layer3Config, Layer3GuardConfig, Layer3RiskConfig, TelegramConfig
+from project_phantom.config import (
+    BackoffConfig,
+    Layer3Config,
+    Layer3GuardConfig,
+    Layer3RiskConfig,
+    Layer3SessionConfig,
+    Layer3SizingConfig,
+    TelegramConfig,
+)
 from project_phantom.core.types import ExecutionEvent, IgnitionBreakdown, PrePumpEvent
 from project_phantom.layer3.executor import run_layer3
 
@@ -96,6 +104,8 @@ def _config(mode: str = "live") -> Layer3Config:
         backoff=BackoffConfig(min_seconds=0.05, max_seconds=0.2),
         risk=Layer3RiskConfig(default_sl_buffer_pct=0.0044, tp1_r_multiple=1.5, tp2_r_multiple=2.5),
         guard=Layer3GuardConfig(min_seconds_between_entries=0.0, max_entries_per_hour=100),
+        sizing=Layer3SizingConfig(enabled=False),
+        session=Layer3SessionConfig(enabled=False),
         telegram=TelegramConfig(enabled=True, bot_token="x", chat_id="y"),
     )
 
@@ -274,6 +284,71 @@ async def test_layer3_guard_rate_limit_blocks_after_cap() -> None:
     # Only first signal executes due to per-hour limit.
     assert len(exec_client.calls) == 4
     assert out_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_layer3_session_filter_blocks_outside_hours() -> None:
+    in_queue: asyncio.Queue[PrePumpEvent] = asyncio.Queue()
+    out_queue: asyncio.Queue[ExecutionEvent] = asyncio.Queue(maxsize=10)
+    stop_event = asyncio.Event()
+    exec_client = FakeExecutionClient()
+    tg_client = FakeTelegramNotifier()
+
+    config = _config("live")
+    config.session.enabled = True
+    config.session.allowed_hours_utc = ()
+    in_queue.put_nowait(_pre_pump_event("LONG"))
+
+    task = asyncio.create_task(
+        run_layer3(
+            config,
+            in_queue,
+            out_queue=out_queue,
+            stop_event=stop_event,
+            execution_client=exec_client,
+            telegram_notifier=tg_client,
+        )
+    )
+    await asyncio.sleep(0.35)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert len(exec_client.calls) == 0
+    assert out_queue.qsize() == 0
+
+
+@pytest.mark.asyncio
+async def test_layer3_adaptive_sizing_changes_quantity() -> None:
+    in_queue: asyncio.Queue[PrePumpEvent] = asyncio.Queue()
+    out_queue: asyncio.Queue[ExecutionEvent] = asyncio.Queue(maxsize=10)
+    stop_event = asyncio.Event()
+    tg_client = FakeTelegramNotifier()
+
+    config = _config("paper")
+    config.sizing.enabled = True
+    config.sizing.min_multiplier = 0.5
+    config.sizing.max_multiplier = 2.0
+    config.sizing.confidence_floor = 0.6
+
+    in_queue.put_nowait(_pre_pump_event("LONG"))
+    task = asyncio.create_task(
+        run_layer3(
+            config,
+            in_queue,
+            out_queue=out_queue,
+            stop_event=stop_event,
+            execution_client=None,
+            telegram_notifier=tg_client,
+        )
+    )
+    await asyncio.sleep(0.35)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert out_queue.qsize() == 1
+    event = out_queue.get_nowait()
+    assert event.plan.quantity != pytest.approx(config.fixed_quantity)
+    assert event.raw.get("adaptive_confidence") is not None
 
 
 def run_prebuilt_plan():

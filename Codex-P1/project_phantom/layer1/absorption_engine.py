@@ -13,6 +13,8 @@ from project_phantom.core.types import (
     AbsorptionBreakdown,
     AbsorptionEvent,
     HealthCounters,
+    OrderBookStreamClient,
+    OrderBookTick,
     StablecoinFlowClient,
     StablecoinFlowObservation,
     TradeStreamClient,
@@ -22,6 +24,8 @@ from project_phantom.core.types import (
 from project_phantom.layer1.metrics import (
     compute_absorption_score,
     compute_cvd_scores,
+    compute_orderbook_imbalance_scores,
+    compute_sweep_aggression_scores,
     compute_stablecoin_inflow_score,
     compute_twap_uniformity_scores,
     compute_whale_net_flow_scores,
@@ -37,8 +41,10 @@ def _now_ms() -> int:
 class _Layer1State:
     active_setup: TrapSetupEvent | None = None
     trades: deque[TradeTick] = field(default_factory=deque)
+    books: deque[OrderBookTick] = field(default_factory=deque)
     stablecoin_flow: StablecoinFlowObservation | None = None
     last_trade_error: str | None = None
+    last_book_error: str | None = None
     last_stablecoin_error: str | None = None
 
 
@@ -56,6 +62,12 @@ def _prune_trades(trades: deque[TradeTick], now_ms: int, window_ms: int) -> None
     cutoff = now_ms - window_ms
     while trades and trades[0].ts_ms < cutoff:
         trades.popleft()
+
+
+def _prune_books(books: deque[OrderBookTick], now_ms: int, window_ms: int) -> None:
+    cutoff = now_ms - window_ms
+    while books and books[0].ts_ms < cutoff:
+        books.popleft()
 
 
 async def _emit_with_drop_oldest(
@@ -114,6 +126,31 @@ async def _trade_collector(
             backoff = min(config.backoff.max_seconds, backoff * 2)
 
 
+async def _book_collector(
+    client: OrderBookStreamClient,
+    config: Layer1Config,
+    state: _Layer1State,
+    stop_event: asyncio.Event,
+    health: HealthCounters,
+) -> None:
+    backoff = config.backoff.min_seconds
+    while not stop_event.is_set():
+        try:
+            async for book in client.stream_book_ticker(config.symbol):
+                if stop_event.is_set():
+                    return
+                state.last_book_error = None
+                state.books.append(book)
+                _prune_books(state.books, now_ms=book.ts_ms, window_ms=config.trade_window_ms)
+            raise RuntimeError("Book ticker stream unexpectedly ended")
+        except Exception as exc:
+            state.last_book_error = f"BOOK_STREAM_{exc.__class__.__name__.upper()}"
+            health.increment_reconnect(getattr(client, "name", "book_client"))
+            if await _sleep_or_stop(stop_event, backoff):
+                return
+            backoff = min(config.backoff.max_seconds, backoff * 2)
+
+
 async def _stablecoin_flow_poller(
     client: StablecoinFlowClient,
     config: Layer1Config,
@@ -148,6 +185,7 @@ async def _scoring_loop(
     while not stop_event.is_set():
         now_ms = _now_ms()
         _prune_trades(state.trades, now_ms=now_ms, window_ms=config.trade_window_ms)
+        _prune_books(state.books, now_ms=now_ms, window_ms=config.trade_window_ms)
 
         setup = state.active_setup
         if setup is None:
@@ -181,11 +219,33 @@ async def _scoring_loop(
             trades=trades,
             cvd_scale_usd=config.thresholds.cvd_scale_usd,
         )
+        sweep_long, sweep_short, max_buy_sweep, max_sell_sweep = compute_sweep_aggression_scores(
+            trades=trades,
+            scale_usd=config.thresholds.sweep_aggression_scale_usd,
+        )
 
         degraded_reasons: list[str] = []
         stablecoin_usd = 0.0
         stablecoin_score = 0.0
         degraded = False
+        avg_imbalance = 0.0
+        avg_spread_bps = 0.0
+        orderbook_long = 0.0
+        orderbook_short = 0.0
+
+        if config.enable_binance_orderbook:
+            books = list(state.books)
+            if not books:
+                degraded = True
+                degraded_reasons.append("ORDERBOOK_NO_DATA")
+            else:
+                orderbook_long, orderbook_short, avg_imbalance, avg_spread_bps = compute_orderbook_imbalance_scores(
+                    books=books,
+                    imbalance_scale=config.thresholds.orderbook_imbalance_scale,
+                )
+            if state.last_book_error:
+                degraded = True
+                degraded_reasons.append(state.last_book_error)
 
         if config.whale_alert.enabled:
             stable_obs = state.stablecoin_flow
@@ -210,6 +270,10 @@ async def _scoring_loop(
             cvd_long=cvd_long,
             cvd_short=cvd_short,
             stablecoin_inflow=stablecoin_score,
+            orderbook_imbalance_long=orderbook_long,
+            orderbook_imbalance_short=orderbook_short,
+            sweep_aggression_long=sweep_long,
+            sweep_aggression_short=sweep_short,
             hidden_divergence_long=hidden_long,
             hidden_divergence_short=hidden_short,
         )
@@ -240,6 +304,10 @@ async def _scoring_loop(
                     "twap_interval_cv": twap_cv,
                     "cvd_delta_usd": cvd_delta,
                     "price_delta_pct": price_delta_pct,
+                    "orderbook_imbalance_avg": avg_imbalance,
+                    "orderbook_spread_bps_avg": avg_spread_bps,
+                    "max_buy_sweep_usd": max_buy_sweep,
+                    "max_sell_sweep_usd": max_sell_sweep,
                     "stablecoin_inflow_usd": stablecoin_usd,
                     "source_trap_score": setup.score,
                     "source_trap_raw": setup.raw,
@@ -262,6 +330,7 @@ async def run_layer1(
     stop_event: asyncio.Event | None = None,
     trade_client: TradeStreamClient | None = None,
     stablecoin_client: StablecoinFlowClient | None = None,
+    book_client: OrderBookStreamClient | None = None,
     health: HealthCounters | None = None,
 ) -> None:
     own_stop_event = stop_event is None
@@ -275,6 +344,7 @@ async def run_layer1(
     async def _run(
         configured_trade_client: TradeStreamClient,
         configured_stablecoin_client: StablecoinFlowClient | None,
+        configured_book_client: OrderBookStreamClient | None,
     ) -> None:
         tasks: list[asyncio.Task[Any]] = [
             asyncio.create_task(
@@ -290,6 +360,14 @@ async def run_layer1(
                 name="layer1-scoring-loop",
             ),
         ]
+
+        if configured_book_client is not None:
+            tasks.append(
+                asyncio.create_task(
+                    _book_collector(configured_book_client, config, state, stop_event, health),
+                    name="layer1-book-collector",
+                )
+            )
 
         if configured_stablecoin_client is not None:
             tasks.append(
@@ -313,7 +391,7 @@ async def run_layer1(
             await asyncio.gather(*tasks, return_exceptions=True)
 
     if trade_client is not None:
-        await _run(trade_client, stablecoin_client)
+        await _run(trade_client, stablecoin_client, book_client)
         return
 
     try:
@@ -322,10 +400,14 @@ async def run_layer1(
         raise RuntimeError("aiohttp is required when using default Layer 1 clients") from exc
 
     from project_phantom.layer1.exchanges.binance_trade_client import BinanceTradeClient
+    from project_phantom.layer1.exchanges.binance_book_client import BinanceBookClient
     from project_phantom.layer1.exchanges.whale_alert_client import WhaleAlertClient
 
     async with aiohttp.ClientSession() as session:
         default_trade_client = BinanceTradeClient(session=session, endpoints=config.endpoints)
+        default_book_client: OrderBookStreamClient | None = None
+        if config.enable_binance_orderbook:
+            default_book_client = BinanceBookClient(session=session, endpoints=config.endpoints)
         default_stablecoin_client: StablecoinFlowClient | None = None
         if config.whale_alert.enabled:
             default_stablecoin_client = WhaleAlertClient(
@@ -334,7 +416,7 @@ async def run_layer1(
                 config=config.whale_alert,
             )
         try:
-            await _run(default_trade_client, default_stablecoin_client)
+            await _run(default_trade_client, default_stablecoin_client, default_book_client)
         except asyncio.CancelledError:
             if own_stop_event:
                 stop_event.set()
@@ -342,6 +424,9 @@ async def run_layer1(
         finally:
             with contextlib.suppress(Exception):
                 await default_trade_client.close()
+            if default_book_client is not None:
+                with contextlib.suppress(Exception):
+                    await default_book_client.close()
             if default_stablecoin_client is not None:
                 with contextlib.suppress(Exception):
                     await default_stablecoin_client.close()

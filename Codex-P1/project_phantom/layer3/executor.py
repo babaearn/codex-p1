@@ -15,7 +15,7 @@ from project_phantom.core.types import (
     PrePumpEvent,
     TelegramNotifier,
 )
-from project_phantom.layer3.planner import build_execution_plan, derive_entry_price
+from project_phantom.layer3.planner import build_execution_plan, derive_adaptive_quantity, derive_entry_price
 from project_phantom.layer3.telegram_formatter import format_telegram_signal
 
 
@@ -75,9 +75,9 @@ async def _place_execution_orders(
     config: Layer3Config,
     event: PrePumpEvent,
     client: FuturesExecutionClient,
+    quantity: float,
 ) -> tuple[dict[str, str], dict[str, Any], float]:
     entry_side, exit_side = _side_from_direction(event.direction)
-    quantity = config.fixed_quantity
 
     entry_response = await client.futures_create_order(
         symbol=config.symbol,
@@ -176,6 +176,9 @@ async def run_layer3(
             return
         if event.event_id in seen_source_event_ids:
             return
+        if config.session.enabled and not config.session.allows_now():
+            print(f"[L3-SESSION] symbol={event.symbol} skip=OUTSIDE_SESSION", flush=True)
+            return
 
         now_ms = _now_ms()
         if last_entry_ts_ms is not None and config.guard.min_seconds_between_entries > 0:
@@ -204,12 +207,25 @@ async def run_layer3(
         order_ids: dict[str, str] = {}
         execution_raw: dict[str, Any] = {}
         plan = None
+        quantity, confidence = derive_adaptive_quantity(
+            event,
+            base_quantity=config.fixed_quantity,
+            sizing=config.sizing,
+        )
+        if quantity <= 0:
+            print(f"[L3-SIZING] symbol={event.symbol} skip=NON_POSITIVE_QUANTITY", flush=True)
+            return
 
         try:
             if config.enable_execution and config.execution_mode.lower() == "live":
                 if active_execution_client is None:
                     raise RuntimeError("Execution client is required for live mode")
-                order_ids, execution_raw, entry_price = await _place_execution_orders(config, event, active_execution_client)
+                order_ids, execution_raw, entry_price = await _place_execution_orders(
+                    config,
+                    event,
+                    active_execution_client,
+                    quantity,
+                )
             else:
                 entry_price = derive_entry_price(event)
                 if entry_price is None:
@@ -217,7 +233,7 @@ async def run_layer3(
                 plan = build_execution_plan(
                     event,
                     entry_price=entry_price,
-                    quantity=config.fixed_quantity,
+                    quantity=quantity,
                     risk_config=config.risk,
                 )
                 order_ids = {"entry": "paper-entry", "sl": "paper-sl", "tp1": "paper-tp1", "tp2": "paper-tp2"}
@@ -227,7 +243,7 @@ async def run_layer3(
                 plan = build_execution_plan(
                     event,
                     entry_price=entry_price,
-                    quantity=config.fixed_quantity,
+                    quantity=quantity,
                     risk_config=config.risk,
                 )
 
@@ -253,6 +269,8 @@ async def run_layer3(
                     "execution_mode": config.execution_mode,
                     "source_pre_pump_score": event.score,
                     "source_pre_pump_confirmations": event.components.confirmations,
+                    "adaptive_confidence": confidence,
+                    "adaptive_quantity": quantity,
                     "execution_raw": execution_raw,
                 },
                 degraded=degraded,

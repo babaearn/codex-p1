@@ -4,7 +4,7 @@ import math
 from typing import Sequence
 
 from project_phantom.config import Layer1ThresholdConfig, Layer1Weights
-from project_phantom.core.types import AbsorptionBreakdown, Direction, TradeTick
+from project_phantom.core.types import AbsorptionBreakdown, Direction, OrderBookTick, TradeTick
 
 
 def clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -103,17 +103,68 @@ def compute_stablecoin_inflow_score(inflow_usd: float, scale_usd: float) -> floa
     return clamp(max(inflow_usd, 0.0) / scale_usd)
 
 
+def compute_orderbook_imbalance_scores(
+    books: Sequence[OrderBookTick],
+    imbalance_scale: float,
+) -> tuple[float, float, float, float]:
+    if not books or imbalance_scale <= 0:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    imbalances: list[float] = []
+    spreads: list[float] = []
+    for book in books:
+        denom = book.bid_qty + book.ask_qty
+        if denom <= 0:
+            continue
+        imbalance = (book.bid_qty - book.ask_qty) / denom
+        imbalances.append(imbalance)
+        spreads.append(book.spread_bps)
+
+    if not imbalances:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    avg_imbalance = sum(imbalances) / len(imbalances)
+    avg_spread_bps = sum(spreads) / len(spreads) if spreads else 0.0
+    long_score = clamp(max(avg_imbalance, 0.0) / imbalance_scale)
+    short_score = clamp(max(-avg_imbalance, 0.0) / imbalance_scale)
+    return (long_score, short_score, avg_imbalance, avg_spread_bps)
+
+
+def compute_sweep_aggression_scores(
+    trades: Sequence[TradeTick],
+    scale_usd: float,
+) -> tuple[float, float, float, float]:
+    if len(trades) < 2 or scale_usd <= 0:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    per_second: dict[int, float] = {}
+    for trade in trades:
+        bucket = int(trade.ts_ms // 1000)
+        per_second[bucket] = per_second.get(bucket, 0.0) + signed_notional(trade)
+
+    if not per_second:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    max_buy_sweep = max(per_second.values())
+    max_sell_sweep = min(per_second.values())
+    long_score = clamp(max(max_buy_sweep, 0.0) / scale_usd)
+    short_score = clamp(max(-max_sell_sweep, 0.0) / scale_usd)
+    return (long_score, short_score, max_buy_sweep, max_sell_sweep)
+
+
 def compute_absorption_score(
     breakdown: AbsorptionBreakdown,
     direction: Direction,
     weights: Layer1Weights,
 ) -> float:
-    whale_flow, twap, cvd, stablecoin = breakdown.score_components(direction)
+    whale_flow, twap, cvd, stablecoin, orderbook_imbalance, sweep_aggression = breakdown.score_components(direction)
     score = (
         weights.whale_net_flow * whale_flow
         + weights.twap_uniformity * twap
         + weights.cvd * cvd
         + weights.stablecoin_inflow * stablecoin
+        + weights.orderbook_imbalance * orderbook_imbalance
+        + weights.sweep_aggression * sweep_aggression
     )
     if breakdown.hidden_divergence_for(direction):
         score += 0.1

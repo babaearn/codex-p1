@@ -105,6 +105,24 @@ class TradeTick:
 
 
 @dataclass
+class OrderBookTick:
+    exchange: str
+    symbol: str
+    bid_price: float
+    bid_qty: float
+    ask_price: float
+    ask_qty: float
+    ts_ms: int
+
+    @property
+    def spread_bps(self) -> float:
+        mid = (self.bid_price + self.ask_price) / 2.0
+        if mid <= 0:
+            return 0.0
+        return ((self.ask_price - self.bid_price) / mid) * 10_000.0
+
+
+@dataclass
 class StablecoinFlowObservation:
     source: str
     inflow_usd: float
@@ -120,22 +138,30 @@ class AbsorptionBreakdown:
     cvd_long: float
     cvd_short: float
     stablecoin_inflow: float
-    hidden_divergence_long: bool
-    hidden_divergence_short: bool
+    hidden_divergence_long: bool = False
+    hidden_divergence_short: bool = False
+    orderbook_imbalance_long: float = 0.0
+    orderbook_imbalance_short: float = 0.0
+    sweep_aggression_long: float = 0.0
+    sweep_aggression_short: float = 0.0
 
-    def score_components(self, direction: Direction) -> tuple[float, float, float, float]:
+    def score_components(self, direction: Direction) -> tuple[float, float, float, float, float, float]:
         if direction == "LONG":
             return (
                 self.whale_net_flow_long,
                 self.twap_uniformity_long,
                 self.cvd_long,
                 self.stablecoin_inflow,
+                self.orderbook_imbalance_long,
+                self.sweep_aggression_long,
             )
         return (
             self.whale_net_flow_short,
             self.twap_uniformity_short,
             self.cvd_short,
             self.stablecoin_inflow,
+            self.orderbook_imbalance_short,
+            self.sweep_aggression_short,
         )
 
     def hidden_divergence_for(self, direction: Direction) -> bool:
@@ -271,6 +297,16 @@ class TradeStreamClient(Protocol):
     name: str
 
     async def stream_trades(self, symbol: str) -> AsyncIterator[TradeTick]:
+        ...
+
+    async def close(self) -> None:
+        ...
+
+
+class OrderBookStreamClient(Protocol):
+    name: str
+
+    async def stream_book_ticker(self, symbol: str) -> AsyncIterator[OrderBookTick]:
         ...
 
     async def close(self) -> None:

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from project_phantom.config import Layer3RiskConfig
+from project_phantom.config import Layer3RiskConfig, Layer3SizingConfig
 from project_phantom.core.types import IgnitionBreakdown, PrePumpEvent
-from project_phantom.layer3.planner import build_execution_plan, derive_entry_price
+from project_phantom.layer3.planner import build_execution_plan, derive_adaptive_quantity, derive_entry_price
 
 
 def _event(direction: str = "LONG") -> PrePumpEvent:
@@ -69,3 +69,15 @@ def test_build_execution_plan_short_uses_zone_high() -> None:
     )
     assert plan.sl == 63_200.0
     assert plan.tp2 < plan.entry
+
+
+def test_derive_adaptive_quantity_scales_with_confidence() -> None:
+    event = _event("LONG")
+    qty, confidence = derive_adaptive_quantity(
+        event,
+        base_quantity=0.01,
+        sizing=Layer3SizingConfig(enabled=True, min_multiplier=0.5, max_multiplier=2.0, confidence_floor=0.6),
+    )
+    assert confidence > 0
+    assert qty >= 0.005
+    assert qty <= 0.02

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 
 @dataclass
@@ -95,10 +96,12 @@ class Layer0Config:
 
 @dataclass
 class Layer1Weights:
-    whale_net_flow: float = 0.35
-    twap_uniformity: float = 0.20
-    cvd: float = 0.30
-    stablecoin_inflow: float = 0.15
+    whale_net_flow: float = 0.24
+    twap_uniformity: float = 0.12
+    cvd: float = 0.22
+    stablecoin_inflow: float = 0.10
+    orderbook_imbalance: float = 0.16
+    sweep_aggression: float = 0.16
 
 
 @dataclass
@@ -110,7 +113,9 @@ class Layer1ThresholdConfig:
     twap_interval_cv_limit: float = 0.35
     cvd_scale_usd: float = 2_000_000.0
     stablecoin_inflow_scale_usd: float = 50_000_000.0
-    min_component_hits: int = 2
+    orderbook_imbalance_scale: float = 0.35
+    sweep_aggression_scale_usd: float = 2_500_000.0
+    min_component_hits: int = 3
 
 
 @dataclass
@@ -130,6 +135,7 @@ class Layer1Config:
     queue_maxsize: int = 200
     min_trades_for_metrics: int = 20
     enable_binance_trades: bool = True
+    enable_binance_orderbook: bool = True
     thresholds: Layer1ThresholdConfig = field(default_factory=Layer1ThresholdConfig)
     weights: Layer1Weights = field(default_factory=Layer1Weights)
     backoff: BackoffConfig = field(default_factory=BackoffConfig)
@@ -182,6 +188,28 @@ class Layer3RiskConfig:
 
 
 @dataclass
+class Layer3SizingConfig:
+    enabled: bool = True
+    min_multiplier: float = 0.5
+    max_multiplier: float = 2.0
+    confidence_floor: float = 0.60
+
+
+@dataclass
+class Layer3SessionConfig:
+    enabled: bool = True
+    # Default session mask: 06:00-23:00 UTC (liquidity-focused).
+    allowed_hours_utc: tuple[int, ...] = tuple(range(6, 24))
+    allow_weekends: bool = True
+
+    def allows_now(self, ts_ms: int | None = None) -> bool:
+        ts = datetime.now(tz=timezone.utc) if ts_ms is None else datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+        if not self.allow_weekends and ts.weekday() >= 5:
+            return False
+        return ts.hour in self.allowed_hours_utc
+
+
+@dataclass
 class Layer3GuardConfig:
     min_seconds_between_entries: float = 20.0
     max_entries_per_hour: int = 12
@@ -216,6 +244,8 @@ class Layer3Config:
     backoff: BackoffConfig = field(default_factory=BackoffConfig)
     endpoints: ExchangeEndpoints = field(default_factory=ExchangeEndpoints)
     risk: Layer3RiskConfig = field(default_factory=Layer3RiskConfig)
+    sizing: Layer3SizingConfig = field(default_factory=Layer3SizingConfig)
+    session: Layer3SessionConfig = field(default_factory=Layer3SessionConfig)
     guard: Layer3GuardConfig = field(default_factory=Layer3GuardConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     binance: BinanceExecutionConfig = field(default_factory=BinanceExecutionConfig)
