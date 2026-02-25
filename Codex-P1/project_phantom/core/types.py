@@ -4,7 +4,9 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, AsyncIterator, Literal, Optional, Protocol
 
 Direction = Literal["LONG", "SHORT"]
-EventType = Literal["TRAP_SETUP_EVENT"]
+TrapEventType = Literal["TRAP_SETUP_EVENT"]
+AbsorptionEventType = Literal["ABSORPTION_EVENT"]
+EventType = Literal["TRAP_SETUP_EVENT", "ABSORPTION_EVENT"]
 
 
 @dataclass
@@ -52,7 +54,7 @@ class SignalBreakdown:
 
 @dataclass
 class TrapSetupEvent:
-    event_type: EventType
+    event_type: TrapEventType
     event_id: str
     ts_ms: int
     symbol: str
@@ -81,6 +83,81 @@ class HealthCounters:
         self.reconnects[exchange] = self.reconnects.get(exchange, 0) + 1
 
 
+@dataclass
+class TradeTick:
+    exchange: str
+    symbol: str
+    price: float
+    quantity: float
+    is_buyer_maker: bool
+    ts_ms: int
+
+    @property
+    def notional(self) -> float:
+        return self.price * self.quantity
+
+
+@dataclass
+class StablecoinFlowObservation:
+    source: str
+    inflow_usd: float
+    ts_ms: int
+
+
+@dataclass
+class AbsorptionBreakdown:
+    whale_net_flow_long: float
+    whale_net_flow_short: float
+    twap_uniformity_long: float
+    twap_uniformity_short: float
+    cvd_long: float
+    cvd_short: float
+    stablecoin_inflow: float
+    hidden_divergence_long: bool
+    hidden_divergence_short: bool
+
+    def score_components(self, direction: Direction) -> tuple[float, float, float, float]:
+        if direction == "LONG":
+            return (
+                self.whale_net_flow_long,
+                self.twap_uniformity_long,
+                self.cvd_long,
+                self.stablecoin_inflow,
+            )
+        return (
+            self.whale_net_flow_short,
+            self.twap_uniformity_short,
+            self.cvd_short,
+            self.stablecoin_inflow,
+        )
+
+    def hidden_divergence_for(self, direction: Direction) -> bool:
+        if direction == "LONG":
+            return self.hidden_divergence_long
+        return self.hidden_divergence_short
+
+
+@dataclass
+class AbsorptionEvent:
+    event_type: AbsorptionEventType
+    event_id: str
+    ts_ms: int
+    symbol: str
+    direction: Direction
+    score: float
+    passed: bool
+    source_trap_event_id: str
+    components: AbsorptionBreakdown
+    raw: dict[str, Any]
+    degraded: bool
+    degrade_reason: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["components"] = asdict(self.components)
+        return payload
+
+
 class ExchangeClient(Protocol):
     name: str
 
@@ -88,6 +165,26 @@ class ExchangeClient(Protocol):
         ...
 
     async def stream_liquidations(self, symbol: str) -> AsyncIterator[LiquidationUpdate]:
+        ...
+
+    async def close(self) -> None:
+        ...
+
+
+class TradeStreamClient(Protocol):
+    name: str
+
+    async def stream_trades(self, symbol: str) -> AsyncIterator[TradeTick]:
+        ...
+
+    async def close(self) -> None:
+        ...
+
+
+class StablecoinFlowClient(Protocol):
+    name: str
+
+    async def fetch_inflow_usd(self) -> StablecoinFlowObservation:
         ...
 
     async def close(self) -> None:

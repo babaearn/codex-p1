@@ -33,9 +33,11 @@ class BackoffConfig:
 class ExchangeEndpoints:
     binance_rest: str = "https://fapi.binance.com"
     binance_ws: str = "wss://fstream.binance.com/stream?streams=!forceOrder@arr"
+    binance_trade_ws: str = "wss://fstream.binance.com/ws"
     bybit_rest: str = "https://api.bybit.com"
     bybit_ws: str = "wss://stream.bybit.com/v5/public/linear"
     okx_rest: str = "https://www.okx.com"
+    whale_alert_rest: str = "https://api.whale-alert.io/v1"
 
 
 @dataclass
@@ -65,3 +67,55 @@ class Layer0Config:
     @property
     def staleness_ms(self) -> int:
         return int(self.snapshot_staleness_seconds * 1000)
+
+
+@dataclass
+class Layer1Weights:
+    whale_net_flow: float = 0.35
+    twap_uniformity: float = 0.20
+    cvd: float = 0.30
+    stablecoin_inflow: float = 0.15
+
+
+@dataclass
+class Layer1ThresholdConfig:
+    score_threshold: float = 0.60
+    component_threshold: float = 0.50
+    whale_notional_usd: float = 100_000.0
+    whale_flow_scale_usd: float = 2_000_000.0
+    twap_interval_cv_limit: float = 0.35
+    cvd_scale_usd: float = 2_000_000.0
+    stablecoin_inflow_scale_usd: float = 50_000_000.0
+    min_component_hits: int = 2
+
+
+@dataclass
+class WhaleAlertConfig:
+    enabled: bool = False
+    api_key: str | None = None
+    poll_interval_seconds: float = 20.0
+    min_transfer_usd: float = 1_000_000.0
+
+
+@dataclass
+class Layer1Config:
+    symbol: str = "BTCUSDT"
+    cadence_seconds: float = 1.0
+    trade_window_seconds: int = 180
+    setup_ttl_seconds: int = 180
+    queue_maxsize: int = 200
+    min_trades_for_metrics: int = 20
+    enable_binance_trades: bool = True
+    thresholds: Layer1ThresholdConfig = field(default_factory=Layer1ThresholdConfig)
+    weights: Layer1Weights = field(default_factory=Layer1Weights)
+    backoff: BackoffConfig = field(default_factory=BackoffConfig)
+    endpoints: ExchangeEndpoints = field(default_factory=ExchangeEndpoints)
+    whale_alert: WhaleAlertConfig = field(default_factory=WhaleAlertConfig)
+
+    @property
+    def trade_window_ms(self) -> int:
+        return self.trade_window_seconds * 1000
+
+    @property
+    def setup_ttl_ms(self) -> int:
+        return self.setup_ttl_seconds * 1000
