@@ -242,6 +242,7 @@ async def _scoring_loop(
                     "price_delta_pct": price_delta_pct,
                     "stablecoin_inflow_usd": stablecoin_usd,
                     "source_trap_score": setup.score,
+                    "source_trap_raw": setup.raw,
                 },
                 degraded=degraded,
                 degrade_reason="|".join(sorted(set(degraded_reasons))) if degraded_reasons else None,

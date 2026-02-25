@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import time
 import uuid
+from dataclasses import asdict
 from dataclasses import dataclass
 from typing import Any
 
@@ -183,6 +184,8 @@ async def _scoring_loop(
                     "source_trap_score": derived["source_trap_score"],
                     "smc_backend": smc_meta.get("backend"),
                     "smc_meta": smc_meta,
+                    "source_absorption_raw": absorption.raw,
+                    "source_absorption_components": asdict(absorption.components),
                 },
                 degraded=degraded,
                 degrade_reason="|".join(sorted(set(degraded_reasons))) if degraded_reasons else None,

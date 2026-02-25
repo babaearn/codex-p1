@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 
@@ -147,3 +148,45 @@ class Layer2Config:
     @property
     def setup_ttl_ms(self) -> int:
         return self.setup_ttl_seconds * 1000
+
+
+@dataclass
+class Layer3RiskConfig:
+    default_sl_buffer_pct: float = 0.0044
+    tp1_r_multiple: float = 1.5
+    tp2_r_multiple: float = 2.5
+    tp1_quantity_ratio: float = 0.5
+
+
+@dataclass
+class TelegramConfig:
+    enabled: bool = True
+    bot_token: str | None = field(default_factory=lambda: os.getenv("TG_BOT_TOKEN"))
+    chat_id: str | None = field(default_factory=lambda: os.getenv("TG_CHAT_ID"))
+
+
+@dataclass
+class BinanceExecutionConfig:
+    api_key: str | None = field(default_factory=lambda: os.getenv("BINANCE_API_KEY"))
+    api_secret: str | None = field(default_factory=lambda: os.getenv("BINANCE_API_SECRET"))
+    testnet: bool = field(default_factory=lambda: os.getenv("BINANCE_TESTNET", "true").lower() == "true")
+
+
+@dataclass
+class Layer3Config:
+    symbol: str = "BTCUSDT"
+    pre_pump_ttl_seconds: int = 180
+    queue_maxsize: int = 200
+    fixed_quantity: float = 0.001
+    enable_execution: bool = True
+    execution_mode: str = "paper"  # "paper" or "live"
+    cadence_seconds: float = 0.25
+    backoff: BackoffConfig = field(default_factory=BackoffConfig)
+    endpoints: ExchangeEndpoints = field(default_factory=ExchangeEndpoints)
+    risk: Layer3RiskConfig = field(default_factory=Layer3RiskConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    binance: BinanceExecutionConfig = field(default_factory=BinanceExecutionConfig)
+
+    @property
+    def pre_pump_ttl_ms(self) -> int:
+        return self.pre_pump_ttl_seconds * 1000

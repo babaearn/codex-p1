@@ -7,7 +7,8 @@ Direction = Literal["LONG", "SHORT"]
 TrapEventType = Literal["TRAP_SETUP_EVENT"]
 AbsorptionEventType = Literal["ABSORPTION_EVENT"]
 PrePumpEventType = Literal["PRE_PUMP_EVENT"]
-EventType = Literal["TRAP_SETUP_EVENT", "ABSORPTION_EVENT", "PRE_PUMP_EVENT"]
+ExecutionEventType = Literal["EXECUTION_EVENT"]
+EventType = Literal["TRAP_SETUP_EVENT", "ABSORPTION_EVENT", "PRE_PUMP_EVENT", "EXECUTION_EVENT"]
 
 
 @dataclass
@@ -213,6 +214,41 @@ class PrePumpEvent:
         return payload
 
 
+@dataclass
+class ExecutionPlan:
+    entry: float
+    sl: float
+    tp1: float
+    tp2: float
+    rr: float
+    sl_pct: float
+    tp1_pct: float
+    tp2_pct: float
+    quantity: float
+    risk_amount: float
+
+
+@dataclass
+class ExecutionEvent:
+    event_type: ExecutionEventType
+    event_id: str
+    ts_ms: int
+    symbol: str
+    direction: Direction
+    passed: bool
+    source_pre_pump_event_id: str
+    plan: ExecutionPlan
+    order_ids: dict[str, str]
+    raw: dict[str, Any]
+    degraded: bool
+    degrade_reason: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["plan"] = asdict(self.plan)
+        return payload
+
+
 class ExchangeClient(Protocol):
     name: str
 
@@ -260,4 +296,24 @@ class SMCDetector(Protocol):
     name: str
 
     async def detect(self, candles: list[Candle], direction: Direction) -> tuple[bool, bool, dict[str, Any]]:
+        ...
+
+
+class FuturesExecutionClient(Protocol):
+    name: str
+
+    async def futures_create_order(self, **kwargs: Any) -> dict[str, Any]:
+        ...
+
+    async def close(self) -> None:
+        ...
+
+
+class TelegramNotifier(Protocol):
+    name: str
+
+    async def send_message(self, text: str) -> None:
+        ...
+
+    async def close(self) -> None:
         ...
