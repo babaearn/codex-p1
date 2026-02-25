@@ -25,6 +25,27 @@ class ThresholdConfig:
 
 
 @dataclass
+class RegimeFilterConfig:
+    enabled: bool = True
+    min_score: float = 0.55
+    trend_ema_fast: int = 21
+    trend_ema_slow: int = 55
+    trend_gap_scale_pct: float = 0.0025
+    max_abs_ret_5m: float = 0.01
+    panic_vol_cutoff: float = 0.03
+
+
+@dataclass
+class AdaptiveGateConfig:
+    enabled: bool = True
+    window_cycles: int = 240
+    quantile: float = 0.75
+    floor: float = 0.70
+    ceiling: float = 0.90
+    min_samples: int = 40
+
+
+@dataclass
 class BackoffConfig:
     min_seconds: float = 2.0
     max_seconds: float = 60.0
@@ -58,6 +79,8 @@ class Layer0Config:
     enable_okx_liquidations: bool = False
     weights: SignalWeights = field(default_factory=SignalWeights)
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
+    regime: RegimeFilterConfig = field(default_factory=RegimeFilterConfig)
+    adaptive_gate: AdaptiveGateConfig = field(default_factory=AdaptiveGateConfig)
     backoff: BackoffConfig = field(default_factory=BackoffConfig)
     endpoints: ExchangeEndpoints = field(default_factory=ExchangeEndpoints)
 
@@ -159,6 +182,12 @@ class Layer3RiskConfig:
 
 
 @dataclass
+class Layer3GuardConfig:
+    min_seconds_between_entries: float = 20.0
+    max_entries_per_hour: int = 12
+
+
+@dataclass
 class TelegramConfig:
     enabled: bool = True
     bot_token: str | None = field(default_factory=lambda: os.getenv("TG_BOT_TOKEN"))
@@ -187,6 +216,7 @@ class Layer3Config:
     backoff: BackoffConfig = field(default_factory=BackoffConfig)
     endpoints: ExchangeEndpoints = field(default_factory=ExchangeEndpoints)
     risk: Layer3RiskConfig = field(default_factory=Layer3RiskConfig)
+    guard: Layer3GuardConfig = field(default_factory=Layer3GuardConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     binance: BinanceExecutionConfig = field(default_factory=BinanceExecutionConfig)
 

@@ -191,6 +191,8 @@ def _format_mode_report(*, symbol_scope: str, symbol_count: int, layer3: Layer3C
         f"symbols_count        : {symbol_count}",
         f"fixed_quantity       : {layer3.fixed_quantity}",
         f"binance_testnet      : {layer3.binance.testnet}",
+        f"entry_cooldown_s     : {layer3.guard.min_seconds_between_entries}",
+        f"max_entries_per_hour : {layer3.guard.max_entries_per_hour}",
         "================================",
     ]
     return "<pre>" + "\n".join(lines) + "</pre>"

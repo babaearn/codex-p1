@@ -5,7 +5,7 @@ from collections import deque
 from statistics import mean
 from typing import Sequence
 
-from project_phantom.config import SignalWeights, ThresholdConfig
+from project_phantom.config import AdaptiveGateConfig, RegimeFilterConfig, SignalWeights, ThresholdConfig
 from project_phantom.core.types import Direction, OIObservation, SignalBreakdown
 
 
@@ -27,6 +27,18 @@ def compute_return(prices: Sequence[float], lookback_points: int) -> float:
         return 0.0
     base = prices[-lookback_points - 1]
     return (prices[-1] / base) - 1.0
+
+
+def compute_ema(prices: Sequence[float], span: int) -> float:
+    if not prices:
+        return 0.0
+    if span <= 1:
+        return float(prices[-1])
+    alpha = 2.0 / (span + 1.0)
+    value = float(prices[0])
+    for price in prices[1:]:
+        value = alpha * float(price) + (1.0 - alpha) * value
+    return value
 
 
 def _latest_before(history: Sequence[OIObservation], ts_ms: int) -> OIObservation | None:
@@ -114,6 +126,99 @@ def compute_funding_oi_scores(
     )
 
 
+def compute_regime_scores(
+    prices: Sequence[float],
+    rv_1h: float,
+    ret_5m: float,
+    regime: RegimeFilterConfig,
+) -> tuple[float, float, dict[str, float | str]]:
+    if not prices:
+        return (
+            0.0,
+            0.0,
+            {
+                "regime_state": "NO_PRICE",
+                "trend_gap_pct": 0.0,
+                "volatility_gate": 0.0,
+            },
+        )
+
+    if len(prices) < max(regime.trend_ema_slow, 8):
+        return (
+            0.5,
+            0.5,
+            {
+                "regime_state": "INSUFFICIENT_HISTORY",
+                "trend_gap_pct": 0.0,
+                "volatility_gate": 0.5,
+            },
+        )
+
+    last_price = float(prices[-1])
+    if last_price <= 0:
+        return (
+            0.0,
+            0.0,
+            {
+                "regime_state": "BAD_PRICE",
+                "trend_gap_pct": 0.0,
+                "volatility_gate": 0.0,
+            },
+        )
+
+    ema_fast = compute_ema(prices[-max(regime.trend_ema_fast * 3, regime.trend_ema_slow + 5) :], regime.trend_ema_fast)
+    ema_slow = compute_ema(prices[-max(regime.trend_ema_slow * 3, regime.trend_ema_slow + 5) :], regime.trend_ema_slow)
+    trend_gap_pct = (ema_fast - ema_slow) / last_price
+
+    trend_long = clamp(0.5 + (trend_gap_pct / max(regime.trend_gap_scale_pct, 1e-9)) * 0.5)
+    trend_short = clamp(1.0 - trend_long)
+
+    compression = clamp(1.0 - (abs(ret_5m) / max(regime.max_abs_ret_5m, 1e-9)))
+    if rv_1h >= regime.panic_vol_cutoff:
+        volatility_gate = 0.0
+        regime_state = "PANIC_VOL"
+    else:
+        volatility_gate = clamp(1.0 - (rv_1h / max(regime.panic_vol_cutoff, 1e-9)))
+        regime_state = "NORMAL"
+
+    long_score = clamp(0.6 * trend_long + 0.4 * (compression * volatility_gate))
+    short_score = clamp(0.6 * trend_short + 0.4 * (compression * volatility_gate))
+    return (
+        long_score,
+        short_score,
+        {
+            "regime_state": regime_state,
+            "ema_fast": ema_fast,
+            "ema_slow": ema_slow,
+            "trend_gap_pct": trend_gap_pct,
+            "volatility_gate": volatility_gate,
+            "compression_regime": compression,
+        },
+    )
+
+
+def compute_adaptive_threshold(
+    observed_scores: Sequence[float],
+    config: AdaptiveGateConfig,
+    base_threshold: float,
+) -> float:
+    if not config.enabled:
+        return base_threshold
+
+    if len(observed_scores) < max(1, config.min_samples):
+        return base_threshold
+
+    ranked = sorted(float(item) for item in observed_scores)
+    quantile = clamp(config.quantile, 0.0, 1.0)
+    idx = int(round((len(ranked) - 1) * quantile))
+    dynamic = ranked[idx]
+    lower = max(base_threshold, config.floor)
+    upper = config.ceiling
+    if upper < lower:
+        upper = lower
+    return clamp(dynamic, lower, upper)
+
+
 def compute_directional_score(
     breakdown: SignalBreakdown,
     direction: Direction,
@@ -132,8 +237,10 @@ def passes_gate(
     direction: Direction,
     score: float,
     threshold: ThresholdConfig,
+    score_threshold_override: float | None = None,
 ) -> bool:
-    if score < threshold.score_threshold:
+    active_threshold = threshold.score_threshold if score_threshold_override is None else score_threshold_override
+    if score < active_threshold:
         return False
     components = breakdown.for_direction(direction)
     passing_components = sum(item >= threshold.component_threshold for item in components)

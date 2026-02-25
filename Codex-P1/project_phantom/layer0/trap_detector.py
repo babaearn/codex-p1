@@ -20,11 +20,13 @@ from project_phantom.core.types import (
 )
 from project_phantom.layer0.liquidation_book import LiquidationBook
 from project_phantom.layer0.signals import (
+    compute_adaptive_threshold,
     compute_directional_score,
     compute_funding_oi_scores,
     compute_oi_acceleration,
     compute_oi_divergence_score,
     compute_oi_pct_change,
+    compute_regime_scores,
     compute_realized_volatility,
     compute_return,
     has_warmup_window,
@@ -169,7 +171,11 @@ def _compose_raw_payload(
     p90_long: float,
     funding_meta: dict[str, float | str],
     threshold_score: float,
+    adaptive_threshold: float,
     component_threshold: float,
+    regime_long_score: float,
+    regime_short_score: float,
+    regime_meta: dict[str, float | str],
 ) -> dict[str, Any]:
     raw: dict[str, Any] = {
         "active_exchanges": ",".join(active_exchanges),
@@ -185,9 +191,13 @@ def _compose_raw_payload(
         "short_cluster_p90_notional": p90_short,
         "long_cluster_p90_notional": p90_long,
         "score_threshold": threshold_score,
+        "adaptive_score_threshold": adaptive_threshold,
         "component_threshold": component_threshold,
+        "regime_long_score": regime_long_score,
+        "regime_short_score": regime_short_score,
     }
     raw.update(funding_meta)
+    raw.update(regime_meta)
     return raw
 
 
@@ -201,6 +211,7 @@ async def _scoring_loop(
     price_history: deque[tuple[int, float]],
 ) -> None:
     configured_exchanges = list(states.keys())
+    score_history: deque[float] = deque(maxlen=max(1, config.adaptive_gate.window_cycles))
     while not stop_event.is_set():
         cycle_start_ms = _now_ms()
         stale_names: list[str] = []
@@ -274,6 +285,17 @@ async def _scoring_loop(
         prices_1m = [item[1] for item in price_history]
         rv_1h = compute_realized_volatility(prices_1m[-60:])
         ret_5m = compute_return(prices_1m, lookback_points=5)
+        regime_long_score, regime_short_score, regime_meta = compute_regime_scores(
+            prices=prices_1m[-180:],
+            rv_1h=rv_1h,
+            ret_5m=ret_5m,
+            regime=config.regime,
+        )
+        adaptive_threshold = compute_adaptive_threshold(
+            observed_scores=list(score_history),
+            config=config.adaptive_gate,
+            base_threshold=config.thresholds.score_threshold,
+        )
 
         liq = book.proximity_scores(current_price=current_price, now_ms=cycle_start_ms)
         oi_div_score, spread = compute_oi_divergence_score(
@@ -303,8 +325,26 @@ async def _scoring_loop(
         )
         score_long = compute_directional_score(breakdown, "LONG", config.weights)
         score_short = compute_directional_score(breakdown, "SHORT", config.weights)
-        long_pass = passes_gate(breakdown, "LONG", score_long, config.thresholds)
-        short_pass = passes_gate(breakdown, "SHORT", score_short, config.thresholds)
+        long_pass = passes_gate(
+            breakdown,
+            "LONG",
+            score_long,
+            config.thresholds,
+            score_threshold_override=adaptive_threshold,
+        )
+        short_pass = passes_gate(
+            breakdown,
+            "SHORT",
+            score_short,
+            config.thresholds,
+            score_threshold_override=adaptive_threshold,
+        )
+
+        if config.regime.enabled:
+            if regime_long_score < config.regime.min_score:
+                long_pass = False
+            if regime_short_score < config.regime.min_score:
+                short_pass = False
 
         if long_pass or short_pass:
             direction = "LONG"
@@ -330,7 +370,11 @@ async def _scoring_loop(
                 p90_long=liq.long_cluster_p90,
                 funding_meta=funding_meta,
                 threshold_score=config.thresholds.score_threshold,
+                adaptive_threshold=adaptive_threshold,
                 component_threshold=config.thresholds.component_threshold,
+                regime_long_score=regime_long_score,
+                regime_short_score=regime_short_score,
+                regime_meta=regime_meta,
             )
             event = TrapSetupEvent(
                 event_type="TRAP_SETUP_EVENT",
@@ -347,6 +391,8 @@ async def _scoring_loop(
             )
             await _emit_with_drop_oldest(out_queue, event, health)
             health.mark_emitted(cycle_start_ms)
+
+        score_history.append(max(score_long, score_short))
 
         if await _sleep_or_stop(stop_event, config.cadence_seconds):
             return

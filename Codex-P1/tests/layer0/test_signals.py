@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from project_phantom.config import SignalWeights, ThresholdConfig
+from project_phantom.config import Layer0Config, SignalWeights, ThresholdConfig
 from project_phantom.core.types import LiquidationUpdate, SignalBreakdown
 from project_phantom.layer0.liquidation_book import LiquidationBook
 from project_phantom.layer0.signals import (
+    compute_adaptive_threshold,
     compute_directional_score,
     compute_funding_oi_scores,
     compute_oi_divergence_score,
+    compute_regime_scores,
     passes_gate,
 )
 
@@ -124,3 +126,28 @@ def test_gate_edges() -> None:
     assert passes_gate(passing, "LONG", passing_score, thresholds)
     assert failing_score < thresholds.score_threshold
     assert not passes_gate(failing, "LONG", failing_score, thresholds)
+
+
+def test_regime_scores_prefer_trend_direction() -> None:
+    prices = [100.0 + idx * 0.2 for idx in range(90)]
+    long_score, short_score, meta = compute_regime_scores(
+        prices=prices,
+        rv_1h=0.01,
+        ret_5m=0.002,
+        regime=Layer0Config().regime,
+    )
+    assert meta["regime_state"] == "NORMAL"
+    assert long_score > short_score
+    assert long_score > 0.5
+
+
+def test_adaptive_threshold_respects_floor_and_quantile() -> None:
+    config = Layer0Config().adaptive_gate
+    observed = [0.50] * 25 + [0.72] * 15 + [0.88] * 60
+    dynamic = compute_adaptive_threshold(
+        observed_scores=observed,
+        config=config,
+        base_threshold=0.70,
+    )
+    assert dynamic >= 0.70
+    assert dynamic <= config.ceiling

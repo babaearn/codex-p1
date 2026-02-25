@@ -7,7 +7,7 @@ from typing import AsyncIterator
 
 import pytest
 
-from project_phantom.config import BackoffConfig, Layer0Config
+from project_phantom.config import AdaptiveGateConfig, BackoffConfig, Layer0Config, RegimeFilterConfig
 from project_phantom.core.types import ExchangeSnapshot, LiquidationUpdate, SignalBreakdown, TrapSetupEvent
 from project_phantom.layer0.trap_detector import run_layer0
 
@@ -82,6 +82,8 @@ def _base_config(
         enable_binance=True,
         enable_bybit=enable_bybit,
         enable_okx=False,
+        regime=RegimeFilterConfig(enabled=False),
+        adaptive_gate=AdaptiveGateConfig(enabled=False),
         backoff=BackoffConfig(min_seconds=0.05, max_seconds=0.2),
     )
 

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import time
 import uuid
+from collections import deque
 from typing import Any
 
 from project_phantom.config import Layer3Config
@@ -160,13 +161,42 @@ async def run_layer3(
 
     active_execution_client = execution_client
     active_telegram_notifier = telegram_notifier
+    last_entry_ts_ms: int | None = None
+    recent_entry_ts: deque[int] = deque()
+    seen_source_event_ids: set[str] = set()
+    seen_source_fifo: deque[str] = deque(maxlen=4000)
 
     async def _process_event(event: PrePumpEvent) -> None:
+        nonlocal last_entry_ts_ms
         if not event.passed:
             return
         if event.symbol.upper() != config.symbol.upper():
             return
         if (_now_ms() - event.ts_ms) > config.pre_pump_ttl_ms:
+            return
+        if event.event_id in seen_source_event_ids:
+            return
+
+        now_ms = _now_ms()
+        if last_entry_ts_ms is not None and config.guard.min_seconds_between_entries > 0:
+            min_gap_ms = int(config.guard.min_seconds_between_entries * 1000)
+            if (now_ms - last_entry_ts_ms) < min_gap_ms:
+                print(
+                    f"[L3-GUARD] symbol={event.symbol} skip=COOLDOWN "
+                    f"remaining_ms={min_gap_ms - (now_ms - last_entry_ts_ms)}",
+                    flush=True,
+                )
+                return
+
+        cutoff_ms = now_ms - 3_600_000
+        while recent_entry_ts and recent_entry_ts[0] < cutoff_ms:
+            recent_entry_ts.popleft()
+        if config.guard.max_entries_per_hour > 0 and len(recent_entry_ts) >= config.guard.max_entries_per_hour:
+            print(
+                f"[L3-GUARD] symbol={event.symbol} skip=RATE_LIMIT_PER_HOUR "
+                f"limit={config.guard.max_entries_per_hour}",
+                flush=True,
+            )
             return
 
         degraded = False
@@ -230,6 +260,13 @@ async def run_layer3(
             )
             await _emit_with_drop_oldest(out_queue, execution_event, health)
             health.mark_emitted(execution_event.ts_ms)
+            last_entry_ts_ms = execution_event.ts_ms
+            recent_entry_ts.append(execution_event.ts_ms)
+            if len(seen_source_fifo) == seen_source_fifo.maxlen and seen_source_fifo:
+                old_id = seen_source_fifo.popleft()
+                seen_source_event_ids.discard(old_id)
+            seen_source_event_ids.add(event.event_id)
+            seen_source_fifo.append(event.event_id)
         except Exception as exc:
             health.increment_reconnect("layer3_executor")
             if active_telegram_notifier is not None and config.telegram.enabled:

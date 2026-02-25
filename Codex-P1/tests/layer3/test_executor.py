@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from project_phantom.config import BackoffConfig, Layer3Config, Layer3RiskConfig, TelegramConfig
+from project_phantom.config import BackoffConfig, Layer3Config, Layer3GuardConfig, Layer3RiskConfig, TelegramConfig
 from project_phantom.core.types import ExecutionEvent, IgnitionBreakdown, PrePumpEvent
 from project_phantom.layer3.executor import run_layer3
 
@@ -95,6 +95,7 @@ def _config(mode: str = "live") -> Layer3Config:
         cadence_seconds=0.05,
         backoff=BackoffConfig(min_seconds=0.05, max_seconds=0.2),
         risk=Layer3RiskConfig(default_sl_buffer_pct=0.0044, tp1_r_multiple=1.5, tp2_r_multiple=2.5),
+        guard=Layer3GuardConfig(min_seconds_between_entries=0.0, max_entries_per_hour=100),
         telegram=TelegramConfig(enabled=True, bot_token="x", chat_id="y"),
     )
 
@@ -203,6 +204,76 @@ async def test_layer3_paper_mode_still_sends_telegram() -> None:
     assert event.raw["execution_mode"] == "paper"
     assert event.plan.tp2 < event.plan.entry
     assert tg_client.messages
+
+
+@pytest.mark.asyncio
+async def test_layer3_guard_cooldown_blocks_second_entry() -> None:
+    in_queue: asyncio.Queue[PrePumpEvent] = asyncio.Queue()
+    out_queue: asyncio.Queue[ExecutionEvent] = asyncio.Queue(maxsize=10)
+    stop_event = asyncio.Event()
+    exec_client = FakeExecutionClient()
+    tg_client = FakeTelegramNotifier()
+
+    config = _config("live")
+    config.guard.min_seconds_between_entries = 999.0
+    config.guard.max_entries_per_hour = 100
+
+    in_queue.put_nowait(_pre_pump_event("LONG"))
+    in_queue.put_nowait(_pre_pump_event("SHORT"))
+    task = asyncio.create_task(
+        run_layer3(
+            config,
+            in_queue,
+            out_queue=out_queue,
+            stop_event=stop_event,
+            execution_client=exec_client,
+            telegram_notifier=tg_client,
+        )
+    )
+    await asyncio.sleep(0.45)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    # First signal executes (4 orders), second is blocked by cooldown.
+    assert len(exec_client.calls) == 4
+    assert out_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_layer3_guard_rate_limit_blocks_after_cap() -> None:
+    in_queue: asyncio.Queue[PrePumpEvent] = asyncio.Queue()
+    out_queue: asyncio.Queue[ExecutionEvent] = asyncio.Queue(maxsize=10)
+    stop_event = asyncio.Event()
+    exec_client = FakeExecutionClient()
+    tg_client = FakeTelegramNotifier()
+
+    config = _config("live")
+    config.guard.min_seconds_between_entries = 0.0
+    config.guard.max_entries_per_hour = 1
+
+    first = _pre_pump_event("LONG")
+    second = _pre_pump_event("SHORT")
+    second.event_id = "pre-short-2"
+    in_queue.put_nowait(first)
+    in_queue.put_nowait(second)
+
+    task = asyncio.create_task(
+        run_layer3(
+            config,
+            in_queue,
+            out_queue=out_queue,
+            stop_event=stop_event,
+            execution_client=exec_client,
+            telegram_notifier=tg_client,
+        )
+    )
+    await asyncio.sleep(0.45)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    # Only first signal executes due to per-hour limit.
+    assert len(exec_client.calls) == 4
+    assert out_queue.qsize() == 1
 
 
 def run_prebuilt_plan():
