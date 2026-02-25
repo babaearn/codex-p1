@@ -191,7 +191,7 @@ async def _scoring_loop(
                 degrade_reason="|".join(sorted(set(degraded_reasons))) if degraded_reasons else None,
             )
             await _emit_with_drop_oldest(out_queue, event, health)
-            health.emitted_events += 1
+            health.mark_emitted(now_ms)
             # Prevent repeated emissions for the same absorption setup.
             state.active_absorption = None
 

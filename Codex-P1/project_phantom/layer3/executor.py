@@ -229,7 +229,7 @@ async def run_layer3(
                 degrade_reason="|".join(sorted(set(degraded_reasons))) if degraded_reasons else None,
             )
             await _emit_with_drop_oldest(out_queue, execution_event, health)
-            health.emitted_events += 1
+            health.mark_emitted(execution_event.ts_ms)
         except Exception as exc:
             health.increment_reconnect("layer3_executor")
             if active_telegram_notifier is not None and config.telegram.enabled:

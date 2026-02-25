@@ -346,7 +346,7 @@ async def _scoring_loop(
                 degrade_reason="|".join(sorted(set(degraded_reasons))) if degraded_reasons else None,
             )
             await _emit_with_drop_oldest(out_queue, event, health)
-            health.emitted_events += 1
+            health.mark_emitted(cycle_start_ms)
 
         if await _sleep_or_stop(stop_event, config.cadence_seconds):
             return

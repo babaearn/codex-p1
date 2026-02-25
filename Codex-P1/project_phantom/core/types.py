@@ -80,9 +80,14 @@ class HealthCounters:
     stale_cycles: int = 0
     queue_drops: int = 0
     emitted_events: int = 0
+    last_emitted_ts_ms: int | None = None
 
     def increment_reconnect(self, exchange: str) -> None:
         self.reconnects[exchange] = self.reconnects.get(exchange, 0) + 1
+
+    def mark_emitted(self, ts_ms: int) -> None:
+        self.emitted_events += 1
+        self.last_emitted_ts_ms = ts_ms
 
 
 @dataclass

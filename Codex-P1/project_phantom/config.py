@@ -163,6 +163,9 @@ class TelegramConfig:
     enabled: bool = True
     bot_token: str | None = field(default_factory=lambda: os.getenv("TG_BOT_TOKEN"))
     chat_id: str | None = field(default_factory=lambda: os.getenv("TG_CHAT_ID"))
+    health_enabled: bool = True
+    health_poll_interval_seconds: float = 2.0
+    health_cooldown_seconds: float = 20.0
 
 
 @dataclass
