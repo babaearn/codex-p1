@@ -23,7 +23,8 @@ async def _execution_printer(queue: asyncio.Queue[ExecutionEvent], stop_event: a
         print(
             f"[EXECUTION] symbol={event.symbol} direction={event.direction} "
             f"entry={event.plan.entry} sl={event.plan.sl} tp1={event.plan.tp1} tp2={event.plan.tp2} "
-            f"rr=1:{event.plan.rr} mode={event.raw.get('execution_mode')}"
+            f"rr=1:{event.plan.rr} mode={event.raw.get('execution_mode')}",
+            flush=True,
         )
 
 
@@ -76,6 +77,33 @@ def _format_mode_report(*, symbol: str, layer3: Layer3Config) -> str:
     return "<pre>" + "\n".join(lines) + "</pre>"
 
 
+async def _heartbeat_logger(
+    *,
+    stop_event: asyncio.Event,
+    queue_l0: asyncio.Queue[TrapSetupEvent],
+    queue_l1: asyncio.Queue[AbsorptionEvent],
+    queue_l2: asyncio.Queue[PrePumpEvent],
+    queue_l3: asyncio.Queue[ExecutionEvent],
+    health_l0: HealthCounters,
+    health_l1: HealthCounters,
+    health_l2: HealthCounters,
+    health_l3: HealthCounters,
+    interval_seconds: int = 60,
+) -> None:
+    while not stop_event.is_set():
+        print(
+            "[HEARTBEAT] "
+            f"q=({queue_l0.qsize()},{queue_l1.qsize()},{queue_l2.qsize()},{queue_l3.qsize()}) "
+            f"emitted=({health_l0.emitted_events},{health_l1.emitted_events},{health_l2.emitted_events},{health_l3.emitted_events}) "
+            f"drops=({health_l0.queue_drops},{health_l1.queue_drops},{health_l2.queue_drops},{health_l3.queue_drops})",
+            flush=True,
+        )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            continue
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Run Project PHANTOM 4-layer pipeline.")
     parser.add_argument("--symbol", default="BTCUSDT")
@@ -96,6 +124,15 @@ async def main() -> None:
     if args.no_telegram:
         layer3.telegram.enabled = False
 
+    print(
+        "[BOOT] "
+        f"symbol={args.symbol} mode={args.mode} "
+        f"telegram_enabled={layer3.telegram.enabled} "
+        f"execution_enabled={layer3.enable_execution} "
+        f"binance_testnet={layer3.binance.testnet}",
+        flush=True,
+    )
+
     health_l0 = HealthCounters()
     health_l1 = HealthCounters()
     health_l2 = HealthCounters()
@@ -110,6 +147,20 @@ async def main() -> None:
             name="layer3",
         ),
         asyncio.create_task(_execution_printer(queue_l3, stop_event), name="execution-printer"),
+        asyncio.create_task(
+            _heartbeat_logger(
+                stop_event=stop_event,
+                queue_l0=queue_l0,
+                queue_l1=queue_l1,
+                queue_l2=queue_l2,
+                queue_l3=queue_l3,
+                health_l0=health_l0,
+                health_l1=health_l1,
+                health_l2=health_l2,
+                health_l3=health_l3,
+            ),
+            name="heartbeat-logger",
+        ),
     ]
 
     if layer3.telegram.enabled and layer3.telegram.health_enabled and layer3.telegram.bot_token and layer3.telegram.chat_id:
