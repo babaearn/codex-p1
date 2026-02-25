@@ -6,7 +6,8 @@ from typing import Any, AsyncIterator, Literal, Optional, Protocol
 Direction = Literal["LONG", "SHORT"]
 TrapEventType = Literal["TRAP_SETUP_EVENT"]
 AbsorptionEventType = Literal["ABSORPTION_EVENT"]
-EventType = Literal["TRAP_SETUP_EVENT", "ABSORPTION_EVENT"]
+PrePumpEventType = Literal["PRE_PUMP_EVENT"]
+EventType = Literal["TRAP_SETUP_EVENT", "ABSORPTION_EVENT", "PRE_PUMP_EVENT"]
 
 
 @dataclass
@@ -158,6 +159,60 @@ class AbsorptionEvent:
         return payload
 
 
+@dataclass
+class Candle:
+    open_time_ms: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    close_time_ms: int
+
+
+@dataclass
+class IgnitionBreakdown:
+    choch: bool
+    order_block: bool
+    absorption_strength: bool
+    trap_strength: bool
+    momentum: bool
+    confirmations: int
+
+    def for_direction(self, direction: Direction) -> tuple[bool, bool, bool, bool, bool]:
+        # Layer 2 confirmations are directional at evaluation time.
+        _ = direction
+        return (
+            self.choch,
+            self.order_block,
+            self.absorption_strength,
+            self.trap_strength,
+            self.momentum,
+        )
+
+
+@dataclass
+class PrePumpEvent:
+    event_type: PrePumpEventType
+    event_id: str
+    ts_ms: int
+    symbol: str
+    direction: Direction
+    score: float
+    passed: bool
+    source_absorption_event_id: str
+    source_trap_event_id: str
+    components: IgnitionBreakdown
+    raw: dict[str, Any]
+    degraded: bool
+    degrade_reason: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["components"] = asdict(self.components)
+        return payload
+
+
 class ExchangeClient(Protocol):
     name: str
 
@@ -188,4 +243,21 @@ class StablecoinFlowClient(Protocol):
         ...
 
     async def close(self) -> None:
+        ...
+
+
+class CandleClient(Protocol):
+    name: str
+
+    async def fetch_candles(self, symbol: str, interval: str, limit: int) -> list[Candle]:
+        ...
+
+    async def close(self) -> None:
+        ...
+
+
+class SMCDetector(Protocol):
+    name: str
+
+    async def detect(self, candles: list[Candle], direction: Direction) -> tuple[bool, bool, dict[str, Any]]:
         ...

@@ -119,3 +119,31 @@ class Layer1Config:
     @property
     def setup_ttl_ms(self) -> int:
         return self.setup_ttl_seconds * 1000
+
+
+@dataclass
+class Layer2ThresholdConfig:
+    min_confirmations: int = 3
+    absorption_score_min: float = 0.60
+    trap_score_min: float = 0.70
+    momentum_lookback_bars: int = 5
+    momentum_min_return_pct: float = 0.0015
+
+
+@dataclass
+class Layer2Config:
+    symbol: str = "BTCUSDT"
+    cadence_seconds: float = 2.0
+    rest_poll_interval_seconds: float = 3.0
+    setup_ttl_seconds: int = 180
+    queue_maxsize: int = 200
+    candle_interval: str = "1m"
+    candle_limit: int = 200
+    enable_smartmoneyconcepts: bool = True
+    thresholds: Layer2ThresholdConfig = field(default_factory=Layer2ThresholdConfig)
+    backoff: BackoffConfig = field(default_factory=BackoffConfig)
+    endpoints: ExchangeEndpoints = field(default_factory=ExchangeEndpoints)
+
+    @property
+    def setup_ttl_ms(self) -> int:
+        return self.setup_ttl_seconds * 1000
