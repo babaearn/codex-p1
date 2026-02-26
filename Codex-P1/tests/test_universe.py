@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
+from project_phantom.config import ExchangeEndpoints
 from project_phantom.universe import (
+    discover_common_futures_symbols,
     parse_binance_quote_volume,
     parse_binance_usdt_perpetual_symbols,
     parse_bybit_linear_usdt_symbols,
@@ -45,3 +49,22 @@ def test_rank_symbols_uses_quote_volume_desc_then_symbol() -> None:
     quote_map = parse_binance_quote_volume(quote_payload)
     ranked = rank_symbols_by_quote_volume(symbols, quote_map)
     assert ranked == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+
+@pytest.mark.asyncio
+async def test_discover_falls_back_to_bybit_when_binance_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _binance_symbols(*args, **kwargs):  # noqa: ANN001
+        return set()
+
+    async def _binance_volumes(*args, **kwargs):  # noqa: ANN001
+        return {}
+
+    async def _bybit_symbols(*args, **kwargs):  # noqa: ANN001
+        return {"DOGEUSDT", "BTCUSDT"}
+
+    monkeypatch.setattr("project_phantom.universe._fetch_binance_symbols", _binance_symbols)
+    monkeypatch.setattr("project_phantom.universe._fetch_binance_quote_volumes", _binance_volumes)
+    monkeypatch.setattr("project_phantom.universe._fetch_bybit_symbols", _bybit_symbols)
+
+    symbols = await discover_common_futures_symbols(ExchangeEndpoints(), max_symbols=0)
+    assert symbols == ["BTCUSDT", "DOGEUSDT"]

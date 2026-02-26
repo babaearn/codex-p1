@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import asyncio
 from typing import Any
 
 import aiohttp
@@ -56,11 +54,27 @@ def rank_symbols_by_quote_volume(symbols: set[str], quote_volume_map: dict[str, 
     return sorted(symbols, key=lambda item: (-quote_volume_map.get(item, 0.0), item))
 
 
+async def _safe_get_json(
+    session: aiohttp.ClientSession,
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    timeout_seconds: int = 15,
+) -> Any | None:
+    try:
+        async with session.get(url, params=params, timeout=timeout_seconds) as response:
+            if response.status >= 400:
+                return None
+            return await response.json()
+    except Exception:
+        return None
+
+
 async def _fetch_binance_symbols(session: aiohttp.ClientSession, rest_base: str) -> set[str]:
     url = f"{rest_base.rstrip('/')}/fapi/v1/exchangeInfo"
-    async with session.get(url, timeout=15) as response:
-        response.raise_for_status()
-        payload = await response.json()
+    payload = await _safe_get_json(session, url, timeout_seconds=15)
+    if not isinstance(payload, dict):
+        return set()
     return parse_binance_usdt_perpetual_symbols(payload)
 
 
@@ -72,9 +86,9 @@ async def _fetch_bybit_symbols(session: aiohttp.ClientSession, rest_base: str) -
         if cursor:
             params["cursor"] = cursor
         url = f"{rest_base.rstrip('/')}/v5/market/instruments-info"
-        async with session.get(url, params=params, timeout=15) as response:
-            response.raise_for_status()
-            payload = await response.json()
+        payload = await _safe_get_json(session, url, params=params, timeout_seconds=15)
+        if not isinstance(payload, dict):
+            break
 
         symbols.update(parse_bybit_linear_usdt_symbols(payload))
         next_cursor = str(payload.get("result", {}).get("nextPageCursor", "")).strip()
@@ -87,9 +101,7 @@ async def _fetch_bybit_symbols(session: aiohttp.ClientSession, rest_base: str) -
 
 async def _fetch_binance_quote_volumes(session: aiohttp.ClientSession, rest_base: str) -> dict[str, float]:
     url = f"{rest_base.rstrip('/')}/fapi/v1/ticker/24hr"
-    async with session.get(url, timeout=20) as response:
-        response.raise_for_status()
-        payload = await response.json()
+    payload = await _safe_get_json(session, url, timeout_seconds=20)
     if not isinstance(payload, list):
         return {}
     return parse_binance_quote_volume(payload)
@@ -100,17 +112,31 @@ async def discover_common_futures_symbols(
     *,
     max_symbols: int = 0,
 ) -> list[str]:
-    async with aiohttp.ClientSession() as session:
-        binance_task = asyncio.create_task(_fetch_binance_symbols(session, endpoints.binance_rest))
-        bybit_task = asyncio.create_task(_fetch_bybit_symbols(session, endpoints.bybit_rest))
-        binance_symbols, bybit_symbols = await asyncio.gather(binance_task, bybit_task)
+    async with aiohttp.ClientSession(headers={"User-Agent": "project-phantom/1.0"}) as session:
+        # Try primary + fallback Binance REST hosts to avoid temporary 418 blocks.
+        binance_bases = [endpoints.binance_rest, "https://fapi1.binance.com", "https://fapi2.binance.com", "https://fapi3.binance.com"]
+        binance_symbols: set[str] = set()
+        quote_volumes: dict[str, float] = {}
+        for base in binance_bases:
+            symbols = await _fetch_binance_symbols(session, base)
+            if symbols:
+                binance_symbols = symbols
+                quote_volumes = await _fetch_binance_quote_volumes(session, base)
+                break
 
-        common_symbols = binance_symbols & bybit_symbols
-        if not common_symbols:
+        bybit_symbols = await _fetch_bybit_symbols(session, endpoints.bybit_rest)
+
+        if binance_symbols and bybit_symbols:
+            selected = binance_symbols & bybit_symbols
+        elif bybit_symbols:
+            selected = bybit_symbols
+        else:
+            selected = binance_symbols
+
+        if not selected:
             return []
 
-        quote_volumes = await _fetch_binance_quote_volumes(session, endpoints.binance_rest)
-        ranked = rank_symbols_by_quote_volume(common_symbols, quote_volumes)
+        ranked = rank_symbols_by_quote_volume(selected, quote_volumes)
         if max_symbols > 0:
             return ranked[:max_symbols]
         return ranked

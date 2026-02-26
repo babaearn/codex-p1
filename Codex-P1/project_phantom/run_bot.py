@@ -15,6 +15,9 @@ from project_phantom.layer3.executor import run_layer3
 from project_phantom.layer3.health_report import format_health_report, run_binance_auth_check, run_public_api_checks
 from project_phantom.universe import discover_common_futures_symbols
 
+DEFAULT_ALL_COMMON_MAX_SYMBOLS = 20
+DEFAULT_HARD_CAP_SYMBOLS = 25
+
 
 @dataclass
 class _SymbolRuntime:
@@ -58,18 +61,35 @@ async def _resolve_symbols(args: argparse.Namespace) -> list[str]:
 
     if args.symbols.strip().upper() == "ALL_COMMON":
         endpoints = Layer0Config().endpoints
+        requested_max_symbols = args.max_symbols if args.max_symbols > 0 else DEFAULT_ALL_COMMON_MAX_SYMBOLS
         discovered = await discover_common_futures_symbols(
             endpoints=endpoints,
-            max_symbols=max(args.max_symbols, 0),
+            max_symbols=requested_max_symbols,
         )
         if not discovered:
-            raise RuntimeError("No common Binance/Bybit USDT futures symbols were discovered")
+            raise RuntimeError("No futures symbols were discovered from Binance/Bybit endpoints")
         return discovered
 
     symbols = _parse_symbol_csv(args.symbols)
     if not symbols:
         raise RuntimeError("No valid symbols were provided in --symbols")
     return symbols
+
+
+def _apply_fanout_cap(symbols: list[str], *, hard_cap_symbols: int, allow_unsafe_fanout: bool) -> list[str]:
+    if allow_unsafe_fanout:
+        return symbols
+    if hard_cap_symbols <= 0:
+        return symbols
+    if len(symbols) <= hard_cap_symbols:
+        return symbols
+    trimmed = symbols[:hard_cap_symbols]
+    print(
+        f"[SAFE-CAP] Requested {len(symbols)} symbols; using first {hard_cap_symbols} to avoid OOM. "
+        "Use --allow-unsafe-fanout to override.",
+        flush=True,
+    )
+    return trimmed
 
 
 def _aggregate_queue_sizes(
@@ -239,18 +259,34 @@ async def main() -> None:
     parser.add_argument(
         "--max-symbols",
         type=int,
-        default=0,
-        help="Optional cap when --symbols=ALL_COMMON. 0 means no cap.",
+        default=DEFAULT_ALL_COMMON_MAX_SYMBOLS,
+        help=f"Cap when --symbols=ALL_COMMON. Default={DEFAULT_ALL_COMMON_MAX_SYMBOLS}.",
+    )
+    parser.add_argument(
+        "--hard-cap-symbols",
+        type=int,
+        default=DEFAULT_HARD_CAP_SYMBOLS,
+        help=f"Safety cap on total symbol fanout. Default={DEFAULT_HARD_CAP_SYMBOLS}.",
+    )
+    parser.add_argument(
+        "--allow-unsafe-fanout",
+        action="store_true",
+        help="Disable safety cap and allow very high symbol fanout (higher OOM risk).",
     )
     parser.add_argument("--mode", choices=["paper", "live"], default="paper")
     parser.add_argument("--no-telegram", action="store_true")
     args = parser.parse_args()
 
     symbols = await _resolve_symbols(args)
+    symbols = _apply_fanout_cap(
+        symbols,
+        hard_cap_symbols=args.hard_cap_symbols,
+        allow_unsafe_fanout=args.allow_unsafe_fanout,
+    )
     symbol_scope = _symbol_scope(symbols)
 
     stop_event = asyncio.Event()
-    execution_queue: asyncio.Queue[ExecutionEvent] = asyncio.Queue(maxsize=max(200, len(symbols) * 40))
+    execution_queue: asyncio.Queue[ExecutionEvent] = asyncio.Queue(maxsize=max(200, len(symbols) * 12))
 
     print(
         "[BOOT] "
@@ -261,21 +297,27 @@ async def main() -> None:
 
     runtimes: list[_SymbolRuntime] = []
     tasks: list[asyncio.Task[object]] = []
+    if len(symbols) <= 10:
+        per_symbol_queue_max = 200
+    elif len(symbols) <= 25:
+        per_symbol_queue_max = 80
+    else:
+        per_symbol_queue_max = 40
 
     for symbol in symbols:
-        queue_l0: asyncio.Queue[TrapSetupEvent] = asyncio.Queue(maxsize=200)
-        queue_l1: asyncio.Queue[AbsorptionEvent] = asyncio.Queue(maxsize=200)
-        queue_l2: asyncio.Queue[PrePumpEvent] = asyncio.Queue(maxsize=200)
+        queue_l0: asyncio.Queue[TrapSetupEvent] = asyncio.Queue(maxsize=per_symbol_queue_max)
+        queue_l1: asyncio.Queue[AbsorptionEvent] = asyncio.Queue(maxsize=per_symbol_queue_max)
+        queue_l2: asyncio.Queue[PrePumpEvent] = asyncio.Queue(maxsize=per_symbol_queue_max)
 
         health_l0 = HealthCounters()
         health_l1 = HealthCounters()
         health_l2 = HealthCounters()
         health_l3 = HealthCounters()
 
-        layer0 = Layer0Config(symbol=symbol)
-        layer1 = Layer1Config(symbol=symbol)
-        layer2 = Layer2Config(symbol=symbol)
-        layer3 = Layer3Config(symbol=symbol, execution_mode=args.mode)
+        layer0 = Layer0Config(symbol=symbol, queue_maxsize=per_symbol_queue_max)
+        layer1 = Layer1Config(symbol=symbol, queue_maxsize=per_symbol_queue_max)
+        layer2 = Layer2Config(symbol=symbol, queue_maxsize=per_symbol_queue_max)
+        layer3 = Layer3Config(symbol=symbol, queue_maxsize=per_symbol_queue_max, execution_mode=args.mode)
         if args.no_telegram:
             layer3.telegram.enabled = False
 
